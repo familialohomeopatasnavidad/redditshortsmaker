@@ -3,7 +3,66 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-const REDDIT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+// Reddit blocks server-side requests, so this edge function acts as a 
+// transparent CORS proxy that forwards the browser's request through
+// multiple fallback strategies.
+
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
+  "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+];
+
+function cleanText(text: string): string {
+  let cleaned = text;
+  cleaned = cleaned.replace(/\n*edit\s*\d*\s*:.*/gi, "");
+  cleaned = cleaned.replace(/\n*update\s*\d*\s*:.*/gi, "");
+  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  cleaned = cleaned.replace(/https?:\/\/\S+/g, "");
+  cleaned = cleaned.replace(/\/?u\/\w+/g, "");
+  cleaned = cleaned.replace(/\/?r\/\w+/g, "");
+  cleaned = cleaned.replace(/[*_~`#>]/g, "");
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+  return cleaned.trim();
+}
+
+async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any> {
+  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+  // Try multiple endpoints
+  const urls = [
+    `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
+    `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
+  ];
+
+  let lastError = "";
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          "User-Agent": ua,
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.5",
+          "Accept-Encoding": "gzip, deflate, br",
+          "Connection": "keep-alive",
+          "Sec-Fetch-Dest": "document",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "none",
+          "Sec-Fetch-User": "?1",
+          "Upgrade-Insecure-Requests": "1",
+        },
+      });
+      if (resp.ok) {
+        return await resp.json();
+      }
+      lastError = `${url} returned ${resp.status}`;
+    } catch (e) {
+      lastError = `${url}: ${String(e)}`;
+    }
+  }
+
+  throw new Error(`All Reddit endpoints failed. Last: ${lastError}`);
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -13,25 +72,8 @@ Deno.serve(async (req) => {
   try {
     const { subreddit = "AskReddit", limit = 25, time = "day" } = await req.json();
 
-    // Use old.reddit.com which is more lenient with API access
-    const url = `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`;
-    
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "RedditShortsBot/1.0 (Educational project)",
-        "Accept": "application/json",
-      },
-    });
+    const data = await fetchFromReddit(subreddit, limit, time);
 
-    if (!response.ok) {
-      const text = await response.text();
-      return new Response(JSON.stringify({ error: `Reddit returned ${response.status}`, details: text }), {
-        status: 502,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
-    const data = await response.json();
     const posts = (data?.data?.children || [])
       .map((child: any) => child.data)
       .filter((post: any) => {
@@ -62,23 +104,3 @@ Deno.serve(async (req) => {
     });
   }
 });
-
-function cleanText(text: string): string {
-  let cleaned = text;
-  // Remove edit sections
-  cleaned = cleaned.replace(/\n*edit\s*\d*\s*:.*/gi, "");
-  cleaned = cleaned.replace(/\n*update\s*\d*\s*:.*/gi, "");
-  // Remove markdown links
-  cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-  // Remove URLs
-  cleaned = cleaned.replace(/https?:\/\/\S+/g, "");
-  // Remove reddit usernames
-  cleaned = cleaned.replace(/\/?u\/\w+/g, "");
-  cleaned = cleaned.replace(/\/?r\/\w+/g, "");
-  // Remove markdown formatting
-  cleaned = cleaned.replace(/[*_~`#>]/g, "");
-  // Collapse whitespace
-  cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-  cleaned = cleaned.trim();
-  return cleaned;
-}
