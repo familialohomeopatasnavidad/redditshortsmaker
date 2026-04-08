@@ -28,36 +28,40 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
-// Fetch directly from browser — Reddit allows browser requests (no CORS issue
-// because .json endpoints return proper CORS headers for browser origins)
+// Fetch via edge function to bypass CORS / Reddit blocking
 export async function fetchRedditPosts(
   subreddit: string,
   count: number,
   excludeIds: string[] = []
 ): Promise<RedditPost[]> {
-  const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=day&limit=50&raw_json=1`;
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-  const response = await fetch(url, {
+  const response = await fetch(`${supabaseUrl}/functions/v1/reddit-fetch`, {
+    method: "POST",
     headers: {
-      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "apikey": supabaseKey,
+      "Authorization": `Bearer ${supabaseKey}`,
     },
+    body: JSON.stringify({ subreddit, limit: 50, time: "day" }),
   });
 
   if (!response.ok) {
-    throw new Error(`Reddit returned ${response.status}. Try again in a moment.`);
+    const errBody = await response.text();
+    throw new Error(`Reddit fetch failed (${response.status}): ${errBody}`);
   }
 
-  const data = await response.json();
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
 
-  const filtered = (data?.data?.children || [])
-    .map((child: any) => child.data)
-    .filter((post: any) => {
-      if (!post.selftext || post.selftext.trim() === "") return false;
-      if (post.over_18) return false;
-      if (post.is_video) return false;
-      return true;
-    })
+  const allPosts = result.posts || [];
+
+  const filtered = allPosts
     .filter((p: any) => !excludeIds.includes(p.id))
+    .filter((p: any) => p.selftext && p.selftext.trim().length > 0)
     .map((post: any) => {
       const cleaned = cleanText(post.selftext);
       const words = cleaned.split(/\s+/).filter(Boolean);
@@ -65,11 +69,11 @@ export async function fetchRedditPosts(
         id: post.id,
         title: post.title,
         selftext: cleaned,
-        score: post.score,
+        score: post.score || 0,
         subreddit: post.subreddit,
         author: post.author,
-        url: `https://reddit.com${post.permalink}`,
-        num_comments: post.num_comments,
+        url: post.url || `https://reddit.com/r/${post.subreddit}/comments/${post.id}`,
+        num_comments: post.num_comments || 0,
         created_utc: post.created_utc,
         wordCount: words.length,
         estimatedDuration: (words.length / WORDS_PER_MINUTE) * 60,
