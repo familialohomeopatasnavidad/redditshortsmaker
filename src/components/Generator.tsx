@@ -1,8 +1,8 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { Play, Loader2, Download, Square, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchRedditPosts, formatScript, type RedditPost } from "@/lib/reddit";
-import { synthesizeSpeech, VOICES } from "@/lib/tts";
+import { synthesizeSpeech, getAvailableVoices, preloadVoices } from "@/lib/tts";
 import { assembleVideo } from "@/lib/video-assembler";
 import { getBackgroundClips, getMusicTracks, getRandomItem } from "@/lib/media-store";
 
@@ -11,7 +11,6 @@ interface GeneratedVideo {
   post: RedditPost;
   blob: Blob;
   url: string;
-  thumbnail?: string;
 }
 
 const SUBREDDITS = [
@@ -29,13 +28,24 @@ const SUBREDDITS = [
 
 export default function Generator() {
   const [subreddit, setSubreddit] = useState("AskReddit");
-  const [voice, setVoice] = useState("en-US-GuyNeural");
+  const [voices, setVoices] = useState<{ id: string; name: string }[]>([]);
+  const [voice, setVoice] = useState("");
   const [running, setRunning] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
   const [videos, setVideos] = useState<GeneratedVideo[]>([]);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef(false);
   const logRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    preloadVoices().then(() => {
+      const available = getAvailableVoices();
+      setVoices(available);
+      if (available.length > 0 && !voice) {
+        setVoice(available[0].id);
+      }
+    });
+  }, []);
 
   const addLog = useCallback((msg: string) => {
     setLogs((prev) => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
@@ -51,7 +61,6 @@ export default function Generator() {
     abortRef.current = false;
 
     try {
-      // Check media
       const bgClips = await getBackgroundClips();
       const musicTracks = await getMusicTracks();
 
@@ -62,42 +71,34 @@ export default function Generator() {
       addLog(`Starting generation for r/${subreddit}`);
       addLog(`Found ${bgClips.length} background clip(s), ${musicTracks.length} music track(s)`);
 
-      // Fetch posts
       addLog("Fetching top posts from Reddit...");
       const usedIds = videos.map((v) => v.post.id);
       const posts = await fetchRedditPosts(subreddit, 1, usedIds);
-
-      if (posts.length === 0) {
-        throw new Error("No suitable posts found. Try a different subreddit or lower the score threshold.");
-      }
 
       const post = posts[0];
       addLog(`✓ Found: "${post.title}" (⬆${post.score.toLocaleString()}, ${post.wordCount} words)`);
 
       if (abortRef.current) return;
 
-      // Format script
       addLog("Formatting script...");
       const script = formatScript(post);
-      addLog(`✓ Script: ${script.split(/\s+/).length} words, ~${Math.round(post.estimatedDuration)}s`);
+      addLog(`✓ Script: ${script.split(/\s+/).length} words`);
 
       if (abortRef.current) return;
 
-      // TTS
-      addLog(`Generating voiceover (${VOICES.find((v) => v.id === voice)?.name || voice})...`);
+      addLog(`Generating voiceover (${voice || "default"})...`);
+      addLog("  ⏳ Speaking text to capture timing...");
       const ttsResult = await synthesizeSpeech(script, voice);
-      addLog(`✓ Audio: ${(ttsResult.durationMs / 1000).toFixed(1)}s, ${ttsResult.wordBoundaries.length} word boundaries`);
+      addLog(`✓ Audio timing: ${(ttsResult.durationMs / 1000).toFixed(1)}s, ${ttsResult.wordBoundaries.length} word boundaries`);
 
       if (abortRef.current) return;
 
-      // Pick random background clip
       const bgClip = getRandomItem(bgClips);
       addLog(`Using background: ${bgClip.name}`);
 
       const musicTrack = musicTracks.length > 0 ? getRandomItem(musicTracks) : null;
       if (musicTrack) addLog(`Using music: ${musicTrack.name}`);
 
-      // Assemble video
       addLog("Assembling video with FFmpeg (this may take a few minutes)...");
       const videoBlob = await assembleVideo({
         audioBlob: ttsResult.audioBlob,
@@ -109,7 +110,6 @@ export default function Generator() {
           addLog(`  ${stage}${percent !== undefined ? ` (${percent}%)` : ""}`);
         },
         onLog: (msg) => {
-          // Only log important ffmpeg messages
           if (msg.includes("Error") || msg.includes("error")) {
             addLog(`  [ffmpeg] ${msg}`);
           }
@@ -117,14 +117,7 @@ export default function Generator() {
       });
 
       const videoUrl = URL.createObjectURL(videoBlob);
-      const newVideo: GeneratedVideo = {
-        id: post.id,
-        post,
-        blob: videoBlob,
-        url: videoUrl,
-      };
-
-      setVideos((prev) => [newVideo, ...prev]);
+      setVideos((prev) => [{ id: post.id, post, blob: videoBlob, url: videoUrl }, ...prev]);
       addLog(`✓ Video ready! ${(videoBlob.size / 1024 / 1024).toFixed(1)} MB`);
     } catch (err: any) {
       const msg = err?.message || String(err);
@@ -137,6 +130,7 @@ export default function Generator() {
 
   const stop = () => {
     abortRef.current = true;
+    window.speechSynthesis?.cancel();
     addLog("Stopping...");
   };
 
@@ -180,7 +174,8 @@ export default function Generator() {
             disabled={running}
             className="w-full h-9 rounded-lg border border-input bg-secondary px-3 text-sm text-foreground disabled:opacity-50"
           >
-            {VOICES.map((v) => (
+            {voices.length === 0 && <option value="">Loading voices...</option>}
+            {voices.map((v) => (
               <option key={v.id} value={v.id}>{v.name}</option>
             ))}
           </select>
@@ -196,6 +191,13 @@ export default function Generator() {
             </Button>
           )}
         </div>
+      </div>
+
+      {/* Info */}
+      <div className="text-xs text-muted-foreground bg-secondary/30 rounded-lg p-3 border border-border">
+        <strong>How it works:</strong> Fetches a top Reddit post → speaks it aloud to capture timing → 
+        crops your background clip to 9:16 (1080×1920) → burns captions → mixes with music → exports MP4.
+        Processing happens in your browser via FFmpeg.wasm — expect 2-5 min per video.
       </div>
 
       {/* Error */}
@@ -241,7 +243,6 @@ export default function Generator() {
           <div className="space-y-3">
             {videos.map((video) => (
               <div key={video.id} className="flex gap-3 p-3 rounded-xl bg-secondary/30 border border-border">
-                {/* Video preview */}
                 <div className="w-20 h-36 rounded-lg overflow-hidden bg-muted flex-shrink-0">
                   <video
                     src={video.url}
