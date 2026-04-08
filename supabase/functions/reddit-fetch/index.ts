@@ -16,68 +16,131 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
-// Use Reddit's public OAuth endpoint which is more reliable for server-side
-async function getAccessToken(): Promise<string> {
-  const resp = await fetch("https://www.reddit.com/api/v1/access_token", {
-    method: "POST",
-    headers: {
-      "Authorization": "Basic " + btoa("ZXhfcmVkZGl0X2FwcA:"),  // anonymous app-only
-      "Content-Type": "application/x-www-form-urlencoded",
-      "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
-    },
-    body: "grant_type=https://oauth.reddit.com/grants/installed_client&device_id=DO_NOT_TRACK_THIS_DEVICE",
-  });
-  if (!resp.ok) {
-    throw new Error(`OAuth token request failed: ${resp.status}`);
-  }
-  const data = await resp.json();
-  return data.access_token;
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, "/")
+    .replace(/&nbsp;/g, " ");
 }
 
-async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any> {
-  // Strategy 1: Try OAuth API (most reliable)
-  try {
-    const token = await getAccessToken();
-    const url = `https://oauth.reddit.com/r/${encodeURIComponent(subreddit)}/top?t=${time}&limit=${limit}&raw_json=1`;
-    const resp = await fetch(url, {
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
-      },
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<p>/gi, "\n")
+    .replace(/<\/p>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
+}
+
+// Parse posts from Reddit RSS/Atom feed
+function parseRssFeed(xml: string, subreddit: string): any[] {
+  const posts: any[] = [];
+  
+  // Match each <entry> in the Atom feed
+  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
+  let match;
+  
+  while ((match = entryRegex.exec(xml)) !== null) {
+    const entry = match[1];
+    
+    const titleMatch = entry.match(/<title[^>]*>([\s\S]*?)<\/title>/);
+    const linkMatch = entry.match(/<link[^>]*href="([^"]*)"[^>]*\/>/);
+    const contentMatch = entry.match(/<content[^>]*>([\s\S]*?)<\/content>/);
+    const idMatch = entry.match(/<id>([\s\S]*?)<\/id>/);
+    const authorMatch = entry.match(/<name>([\s\S]*?)<\/name>/);
+    
+    if (!contentMatch) continue;
+    
+    const rawContent = decodeHtmlEntities(contentMatch[1]);
+    const textContent = stripHtml(rawContent);
+    const cleanedText = cleanText(textContent);
+    
+    // Skip posts with very little text (likely link posts or images)
+    if (cleanedText.length < 50) continue;
+    
+    // Extract ID from the full URL
+    const permalink = linkMatch ? linkMatch[1] : "";
+    const idParts = permalink.match(/\/comments\/([a-z0-9]+)\//);
+    const id = idParts ? idParts[1] : (idMatch ? idMatch[1].replace(/[^a-z0-9]/gi, "").slice(-8) : Math.random().toString(36).slice(2, 10));
+    
+    posts.push({
+      id,
+      title: titleMatch ? decodeHtmlEntities(titleMatch[1]) : "Untitled",
+      selftext: cleanedText,
+      score: 0,  // RSS doesn't include score
+      subreddit: subreddit,
+      author: authorMatch ? authorMatch[1].replace("/u/", "") : "anonymous",
+      url: permalink || `https://reddit.com/r/${subreddit}`,
+      num_comments: 0,
+      created_utc: Date.now() / 1000,
     });
-    if (resp.ok) {
-      return await resp.json();
-    }
-    console.log("OAuth API returned", resp.status);
-  } catch (e) {
-    console.log("OAuth strategy failed:", e);
   }
+  
+  return posts;
+}
 
-  // Strategy 2: Try www.reddit.com .json
-  const urls = [
-    `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
-    `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
-  ];
+// Try multiple approaches to get Reddit data
+async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<{ posts: any[], source: string }> {
+  const ua = "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)";
+  const errors: string[] = [];
 
-  let lastError = "";
-  for (const url of urls) {
+  // Strategy 1: JSON endpoint with minimal headers
+  for (const domain of ["www.reddit.com", "old.reddit.com"]) {
     try {
+      const url = `https://${domain}/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`;
       const resp = await fetch(url, {
-        headers: {
-          "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
-          "Accept": "application/json",
-        },
+        headers: { "User-Agent": ua, "Accept": "application/json" },
       });
       if (resp.ok) {
-        return await resp.json();
+        const data = await resp.json();
+        const posts = (data?.data?.children || [])
+          .map((child: any) => child.data)
+          .filter((post: any) => post.selftext && post.selftext.trim() !== "" && !post.over_18 && !post.is_video)
+          .map((post: any) => ({
+            id: post.id,
+            title: post.title,
+            selftext: cleanText(post.selftext),
+            score: post.score,
+            subreddit: post.subreddit,
+            author: post.author,
+            url: `https://reddit.com${post.permalink}`,
+            num_comments: post.num_comments,
+            created_utc: post.created_utc,
+          }));
+        return { posts, source: domain };
       }
-      lastError = `${url} returned ${resp.status}`;
+      errors.push(`${domain}: ${resp.status}`);
     } catch (e) {
-      lastError = `${url}: ${String(e)}`;
+      errors.push(`${domain}: ${String(e)}`);
     }
   }
 
-  throw new Error(`All Reddit endpoints failed. Last: ${lastError}`);
+  // Strategy 2: RSS/Atom feed (usually less restricted)
+  try {
+    const rssUrl = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.rss?t=${time}&limit=${limit}`;
+    const resp = await fetch(rssUrl, {
+      headers: { "User-Agent": ua, "Accept": "application/atom+xml,application/xml,text/xml" },
+    });
+    if (resp.ok) {
+      const xml = await resp.text();
+      const posts = parseRssFeed(xml, subreddit);
+      if (posts.length > 0) {
+        return { posts, source: "rss" };
+      }
+      errors.push("RSS: parsed 0 posts");
+    } else {
+      errors.push(`RSS: ${resp.status}`);
+    }
+  } catch (e) {
+    errors.push(`RSS: ${String(e)}`);
+  }
+
+  throw new Error(`All Reddit endpoints failed: ${errors.join("; ")}`);
 }
 
 Deno.serve(async (req) => {
@@ -87,30 +150,12 @@ Deno.serve(async (req) => {
 
   try {
     const { subreddit = "AskReddit", limit = 25, time = "day" } = await req.json();
+    console.log(`Fetching r/${subreddit}, limit=${limit}, time=${time}`);
 
-    const data = await fetchFromReddit(subreddit, limit, time);
+    const { posts, source } = await fetchFromReddit(subreddit, limit, time);
+    console.log(`Got ${posts.length} posts from ${source}`);
 
-    const posts = (data?.data?.children || [])
-      .map((child: any) => child.data)
-      .filter((post: any) => {
-        if (!post.selftext || post.selftext.trim() === "") return false;
-        if (post.over_18) return false;
-        if (post.is_video) return false;
-        return true;
-      })
-      .map((post: any) => ({
-        id: post.id,
-        title: post.title,
-        selftext: cleanText(post.selftext),
-        score: post.score,
-        subreddit: post.subreddit,
-        author: post.author,
-        url: `https://reddit.com${post.permalink}`,
-        num_comments: post.num_comments,
-        created_utc: post.created_utc,
-      }));
-
-    return new Response(JSON.stringify({ posts }), {
+    return new Response(JSON.stringify({ posts, source }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
