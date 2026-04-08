@@ -1,16 +1,23 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { useRef } from "react";
+import HeroSection from "@/components/HeroSection";
+import FeaturesSection from "@/components/FeaturesSection";
+import DemoSection from "@/components/DemoSection";
+import SetupSection from "@/components/SetupSection";
 
-// IMPORTANT: Fully REPLACE this with your own code
-const PlaceholderIndex = () => {
-  // PLACEHOLDER: Replace this entire return statement with the user's app.
-  // The inline background color is intentionally not part of the design system.
+export default function Index() {
+  const demoRef = useRef<HTMLDivElement>(null);
+  const scrollToDemo = () => demoRef.current?.scrollIntoView({ behavior: "smooth" });
+
   return (
-    <div className="flex min-h-screen items-center justify-center" style={{ backgroundColor: '#fcfbf8' }}>
-      <img data-lovable-blank-page-placeholder="REMOVE_THIS" src="/placeholder.svg" alt="Your app will live here!" />
+    <div className="min-h-screen bg-background text-foreground">
+      <HeroSection onScrollToDemo={scrollToDemo} />
+      <FeaturesSection />
+      <DemoSection ref={demoRef} />
+      <SetupSection />
+
+      <footer className="border-t border-border py-8 text-center text-xs text-muted-foreground">
+        Reddit Shorts Generator · Built with FastAPI + FFmpeg + edge-tts
+      </footer>
     </div>
   );
-};
-
-const Index = PlaceholderIndex;
-
-export default Index;
+}
