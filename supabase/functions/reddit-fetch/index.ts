@@ -18,17 +18,18 @@ function cleanText(text: string): string {
 
 async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any[]> {
   const errors: string[] = [];
-
-  // Calculate time range
   const now = Math.floor(Date.now() / 1000);
+
+  // Calculate ISO date for Arctic Shift
   const timeRanges: Record<string, number> = {
     hour: 3600, day: 86400, week: 604800, month: 2592000, year: 31536000,
   };
-  const after = now - (timeRanges[time] || 86400);
+  const afterUnix = now - (timeRanges[time] || 86400);
+  const afterDate = new Date(afterUnix * 1000).toISOString().split("T")[0];
 
   // Strategy 1: Arctic Shift API (Reddit archive, very reliable)
   try {
-    const url = `https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=${encodeURIComponent(subreddit)}&after=${after}&limit=${limit}&sort=score&order=desc`;
+    const url = `https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=${encodeURIComponent(subreddit)}&after=${afterDate}&limit=${limit}&sort=desc`;
     console.log("Trying Arctic Shift:", url);
     const resp = await fetch(url, {
       headers: { "User-Agent": "lovable-reddit-reader/1.0" },
@@ -54,6 +55,8 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
       }
       errors.push("Arctic Shift: 0 text posts");
     } else {
+      const body = await resp.text();
+      console.log("Arctic Shift error body:", body.slice(0, 300));
       errors.push(`Arctic Shift: ${resp.status}`);
     }
   } catch (e) {
