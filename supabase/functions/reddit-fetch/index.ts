@@ -16,131 +16,119 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
-function decodeHtmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&#x2F;/g, "/")
-    .replace(/&nbsp;/g, " ");
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<p>/gi, "\n")
-    .replace(/<\/p>/gi, "")
-    .replace(/<[^>]+>/g, "")
-    .trim();
-}
-
-// Parse posts from Reddit RSS/Atom feed
-function parseRssFeed(xml: string, subreddit: string): any[] {
-  const posts: any[] = [];
-  
-  // Match each <entry> in the Atom feed
-  const entryRegex = /<entry>([\s\S]*?)<\/entry>/g;
-  let match;
-  
-  while ((match = entryRegex.exec(xml)) !== null) {
-    const entry = match[1];
-    
-    const titleMatch = entry.match(/<title[^>]*>([\s\S]*?)<\/title>/);
-    const linkMatch = entry.match(/<link[^>]*href="([^"]*)"[^>]*\/>/);
-    const contentMatch = entry.match(/<content[^>]*>([\s\S]*?)<\/content>/);
-    const idMatch = entry.match(/<id>([\s\S]*?)<\/id>/);
-    const authorMatch = entry.match(/<name>([\s\S]*?)<\/name>/);
-    
-    if (!contentMatch) continue;
-    
-    const rawContent = decodeHtmlEntities(contentMatch[1]);
-    const textContent = stripHtml(rawContent);
-    const cleanedText = cleanText(textContent);
-    
-    // Skip posts with very little text (likely link posts or images)
-    if (cleanedText.length < 50) continue;
-    
-    // Extract ID from the full URL
-    const permalink = linkMatch ? linkMatch[1] : "";
-    const idParts = permalink.match(/\/comments\/([a-z0-9]+)\//);
-    const id = idParts ? idParts[1] : (idMatch ? idMatch[1].replace(/[^a-z0-9]/gi, "").slice(-8) : Math.random().toString(36).slice(2, 10));
-    
-    posts.push({
-      id,
-      title: titleMatch ? decodeHtmlEntities(titleMatch[1]) : "Untitled",
-      selftext: cleanedText,
-      score: 0,  // RSS doesn't include score
-      subreddit: subreddit,
-      author: authorMatch ? authorMatch[1].replace("/u/", "") : "anonymous",
-      url: permalink || `https://reddit.com/r/${subreddit}`,
-      num_comments: 0,
-      created_utc: Date.now() / 1000,
-    });
-  }
-  
-  return posts;
-}
-
-// Try multiple approaches to get Reddit data
-async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<{ posts: any[], source: string }> {
-  const ua = "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)";
+async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any[]> {
   const errors: string[] = [];
 
-  // Strategy 1: JSON endpoint with minimal headers
-  for (const domain of ["www.reddit.com", "old.reddit.com"]) {
-    try {
-      const url = `https://${domain}/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`;
-      const resp = await fetch(url, {
-        headers: { "User-Agent": ua, "Accept": "application/json" },
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        const posts = (data?.data?.children || [])
-          .map((child: any) => child.data)
-          .filter((post: any) => post.selftext && post.selftext.trim() !== "" && !post.over_18 && !post.is_video)
-          .map((post: any) => ({
-            id: post.id,
-            title: post.title,
-            selftext: cleanText(post.selftext),
-            score: post.score,
-            subreddit: post.subreddit,
-            author: post.author,
-            url: `https://reddit.com${post.permalink}`,
-            num_comments: post.num_comments,
-            created_utc: post.created_utc,
-          }));
-        return { posts, source: domain };
-      }
-      errors.push(`${domain}: ${resp.status}`);
-    } catch (e) {
-      errors.push(`${domain}: ${String(e)}`);
-    }
-  }
+  // Calculate time range
+  const now = Math.floor(Date.now() / 1000);
+  const timeRanges: Record<string, number> = {
+    hour: 3600, day: 86400, week: 604800, month: 2592000, year: 31536000,
+  };
+  const after = now - (timeRanges[time] || 86400);
 
-  // Strategy 2: RSS/Atom feed (usually less restricted)
+  // Strategy 1: Arctic Shift API (Reddit archive, very reliable)
   try {
-    const rssUrl = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.rss?t=${time}&limit=${limit}`;
-    const resp = await fetch(rssUrl, {
-      headers: { "User-Agent": ua, "Accept": "application/atom+xml,application/xml,text/xml" },
+    const url = `https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=${encodeURIComponent(subreddit)}&after=${after}&limit=${limit}&sort=score&order=desc`;
+    console.log("Trying Arctic Shift:", url);
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "lovable-reddit-reader/1.0" },
     });
     if (resp.ok) {
-      const xml = await resp.text();
-      const posts = parseRssFeed(xml, subreddit);
+      const data = await resp.json();
+      const posts = (data?.data || [])
+        .filter((post: any) => post.selftext && post.selftext.trim() !== "" && post.selftext !== "[removed]" && post.selftext !== "[deleted]" && !post.over_18)
+        .map((post: any) => ({
+          id: post.id,
+          title: post.title,
+          selftext: cleanText(post.selftext),
+          score: post.score || 0,
+          subreddit: post.subreddit || subreddit,
+          author: post.author || "anonymous",
+          url: `https://reddit.com/r/${post.subreddit || subreddit}/comments/${post.id}`,
+          num_comments: post.num_comments || 0,
+          created_utc: post.created_utc || now,
+        }));
       if (posts.length > 0) {
-        return { posts, source: "rss" };
+        console.log(`Arctic Shift returned ${posts.length} posts`);
+        return posts;
       }
-      errors.push("RSS: parsed 0 posts");
+      errors.push("Arctic Shift: 0 text posts");
     } else {
-      errors.push(`RSS: ${resp.status}`);
+      errors.push(`Arctic Shift: ${resp.status}`);
     }
   } catch (e) {
-    errors.push(`RSS: ${String(e)}`);
+    errors.push(`Arctic Shift: ${String(e)}`);
   }
 
-  throw new Error(`All Reddit endpoints failed: ${errors.join("; ")}`);
+  // Strategy 2: PullPush API
+  try {
+    const url = `https://api.pullpush.io/reddit/search/submission/?subreddit=${encodeURIComponent(subreddit)}&after=${after}&sort=score&sort_type=desc&size=${limit}`;
+    console.log("Trying PullPush:", url);
+    const resp = await fetch(url, {
+      headers: { "User-Agent": "lovable-reddit-reader/1.0" },
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const posts = (data?.data || [])
+        .filter((post: any) => post.selftext && post.selftext.trim() !== "" && post.selftext !== "[removed]" && post.selftext !== "[deleted]" && !post.over_18)
+        .map((post: any) => ({
+          id: post.id,
+          title: post.title,
+          selftext: cleanText(post.selftext),
+          score: post.score || 0,
+          subreddit: post.subreddit || subreddit,
+          author: post.author || "anonymous",
+          url: post.full_link || `https://reddit.com/r/${subreddit}/comments/${post.id}`,
+          num_comments: post.num_comments || 0,
+          created_utc: post.created_utc || now,
+        }));
+      if (posts.length > 0) {
+        console.log(`PullPush returned ${posts.length} posts`);
+        return posts;
+      }
+      errors.push("PullPush: 0 text posts");
+    } else {
+      errors.push(`PullPush: ${resp.status}`);
+    }
+  } catch (e) {
+    errors.push(`PullPush: ${String(e)}`);
+  }
+
+  // Strategy 3: Direct Reddit (might work sometimes)
+  try {
+    const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`;
+    const resp = await fetch(url, {
+      headers: {
+        "User-Agent": "lovable-reddit-reader/1.0",
+        "Accept": "application/json",
+      },
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const posts = (data?.data?.children || [])
+        .map((child: any) => child.data)
+        .filter((post: any) => post.selftext && post.selftext.trim() !== "" && !post.over_18 && !post.is_video)
+        .map((post: any) => ({
+          id: post.id,
+          title: post.title,
+          selftext: cleanText(post.selftext),
+          score: post.score,
+          subreddit: post.subreddit,
+          author: post.author,
+          url: `https://reddit.com${post.permalink}`,
+          num_comments: post.num_comments,
+          created_utc: post.created_utc,
+        }));
+      if (posts.length > 0) return posts;
+      errors.push("Reddit JSON: 0 text posts");
+    } else {
+      errors.push(`Reddit JSON: ${resp.status}`);
+    }
+  } catch (e) {
+    errors.push(`Reddit JSON: ${String(e)}`);
+  }
+
+  throw new Error(`All Reddit sources failed: ${errors.join("; ")}`);
 }
 
 Deno.serve(async (req) => {
@@ -152,10 +140,9 @@ Deno.serve(async (req) => {
     const { subreddit = "AskReddit", limit = 25, time = "day" } = await req.json();
     console.log(`Fetching r/${subreddit}, limit=${limit}, time=${time}`);
 
-    const { posts, source } = await fetchFromReddit(subreddit, limit, time);
-    console.log(`Got ${posts.length} posts from ${source}`);
+    const posts = await fetchFromReddit(subreddit, limit, time);
 
-    return new Response(JSON.stringify({ posts, source }), {
+    return new Response(JSON.stringify({ posts }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
