@@ -121,7 +121,7 @@ export async function assembleVideo(opts: {
 
   onProgress("Reading output...", 90);
   const outputData = await ff.readFile("final.mp4");
-  const outputBlob = new Blob([outputData], { type: "video/mp4" });
+  const outputBlob = new Blob([new Uint8Array(outputData as Uint8Array)], { type: "video/mp4" });
 
   // Cleanup
   try {
