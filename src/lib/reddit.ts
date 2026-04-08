@@ -58,17 +58,10 @@ export async function fetchRedditPosts(
   }
 
   const allPosts = result.posts || [];
-  const data = { data: { children: allPosts.map((p: any) => ({ data: p })) } };
 
-  const filtered = (data?.data?.children || [])
-    .map((child: any) => child.data)
-    .filter((post: any) => {
-      if (!post.selftext || post.selftext.trim() === "") return false;
-      if (post.over_18) return false;
-      if (post.is_video) return false;
-      return true;
-    })
+  const filtered = allPosts
     .filter((p: any) => !excludeIds.includes(p.id))
+    .filter((p: any) => p.selftext && p.selftext.trim().length > 0)
     .map((post: any) => {
       const cleaned = cleanText(post.selftext);
       const words = cleaned.split(/\s+/).filter(Boolean);
@@ -76,11 +69,11 @@ export async function fetchRedditPosts(
         id: post.id,
         title: post.title,
         selftext: cleaned,
-        score: post.score,
+        score: post.score || 0,
         subreddit: post.subreddit,
         author: post.author,
-        url: `https://reddit.com${post.permalink}`,
-        num_comments: post.num_comments,
+        url: post.url || `https://reddit.com/r/${post.subreddit}/comments/${post.id}`,
+        num_comments: post.num_comments || 0,
         created_utc: post.created_utc,
         wordCount: words.length,
         estimatedDuration: (words.length / WORDS_PER_MINUTE) * 60,
