@@ -13,10 +13,14 @@ Deno.serve(async (req) => {
   try {
     const { subreddit = "AskReddit", limit = 25, time = "day" } = await req.json();
 
-    const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}`;
+    // Use old.reddit.com which is more lenient with API access
+    const url = `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`;
     
     const response = await fetch(url, {
-      headers: { "User-Agent": REDDIT_USER_AGENT },
+      headers: {
+        "User-Agent": "RedditShortsBot/1.0 (Educational project)",
+        "Accept": "application/json",
+      },
     });
 
     if (!response.ok) {
