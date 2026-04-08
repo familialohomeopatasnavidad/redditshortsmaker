@@ -28,26 +28,37 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
-// Fetch directly from browser — Reddit allows browser requests (no CORS issue
-// because .json endpoints return proper CORS headers for browser origins)
+// Fetch via edge function to bypass CORS / Reddit blocking
 export async function fetchRedditPosts(
   subreddit: string,
   count: number,
   excludeIds: string[] = []
 ): Promise<RedditPost[]> {
-  const url = `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=day&limit=50&raw_json=1`;
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-  const response = await fetch(url, {
+  const response = await fetch(`${supabaseUrl}/functions/v1/reddit-fetch`, {
+    method: "POST",
     headers: {
-      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "apikey": supabaseKey,
+      "Authorization": `Bearer ${supabaseKey}`,
     },
+    body: JSON.stringify({ subreddit, limit: 50, time: "day" }),
   });
 
   if (!response.ok) {
-    throw new Error(`Reddit returned ${response.status}. Try again in a moment.`);
+    const errBody = await response.text();
+    throw new Error(`Reddit fetch failed (${response.status}): ${errBody}`);
   }
 
-  const data = await response.json();
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  const allPosts = result.posts || [];
+  const data = { data: { children: allPosts.map((p: any) => ({ data: p })) } };
 
   const filtered = (data?.data?.children || [])
     .map((child: any) => child.data)
