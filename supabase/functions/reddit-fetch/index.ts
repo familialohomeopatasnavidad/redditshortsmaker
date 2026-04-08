@@ -3,16 +3,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Reddit blocks server-side requests, so this edge function acts as a 
-// transparent CORS proxy that forwards the browser's request through
-// multiple fallback strategies.
-
-const USER_AGENTS = [
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
-  "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
-];
-
 function cleanText(text: string): string {
   let cleaned = text;
   cleaned = cleaned.replace(/\n*edit\s*\d*\s*:.*/gi, "");
@@ -26,10 +16,44 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
-async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any> {
-  const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+// Use Reddit's public OAuth endpoint which is more reliable for server-side
+async function getAccessToken(): Promise<string> {
+  const resp = await fetch("https://www.reddit.com/api/v1/access_token", {
+    method: "POST",
+    headers: {
+      "Authorization": "Basic " + btoa("ZXhfcmVkZGl0X2FwcA:"),  // anonymous app-only
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
+    },
+    body: "grant_type=https://oauth.reddit.com/grants/installed_client&device_id=DO_NOT_TRACK_THIS_DEVICE",
+  });
+  if (!resp.ok) {
+    throw new Error(`OAuth token request failed: ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.access_token;
+}
 
-  // Try multiple endpoints
+async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any> {
+  // Strategy 1: Try OAuth API (most reliable)
+  try {
+    const token = await getAccessToken();
+    const url = `https://oauth.reddit.com/r/${encodeURIComponent(subreddit)}/top?t=${time}&limit=${limit}&raw_json=1`;
+    const resp = await fetch(url, {
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
+      },
+    });
+    if (resp.ok) {
+      return await resp.json();
+    }
+    console.log("OAuth API returned", resp.status);
+  } catch (e) {
+    console.log("OAuth strategy failed:", e);
+  }
+
+  // Strategy 2: Try www.reddit.com .json
   const urls = [
     `https://www.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
     `https://old.reddit.com/r/${encodeURIComponent(subreddit)}/top.json?t=${time}&limit=${limit}&raw_json=1`,
@@ -40,16 +64,8 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
     try {
       const resp = await fetch(url, {
         headers: {
-          "User-Agent": ua,
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Accept-Encoding": "gzip, deflate, br",
-          "Connection": "keep-alive",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
+          "User-Agent": "web:lovable-reddit-reader:v1.0 (by /u/lovable_app)",
+          "Accept": "application/json",
         },
       });
       if (resp.ok) {
@@ -98,6 +114,7 @@ Deno.serve(async (req) => {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   } catch (err) {
+    console.error("reddit-fetch error:", err);
     return new Response(JSON.stringify({ error: String(err) }), {
       status: 500,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
