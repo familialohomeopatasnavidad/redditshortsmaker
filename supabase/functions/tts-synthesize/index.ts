@@ -1,4 +1,7 @@
-import { corsHeaders } from '@supabase/supabase-js/cors'
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+};
 
 // Microsoft Edge TTS via WebSocket - reimplemented for Deno
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
