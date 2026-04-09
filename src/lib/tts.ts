@@ -17,6 +17,11 @@ export interface TTSVoice {
   locale: string;
 }
 
+// ─── CONFIG ──────────────────────────────────────────────────────────────────
+// Replace this with your actual Supabase Edge Function URL
+const EDGE_TTS_URL = "https://YOUR_PROJECT.supabase.co/functions/v1/YOUR_FUNCTION_NAME";
+// ─────────────────────────────────────────────────────────────────────────────
+
 function escapeXml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -26,73 +31,26 @@ function escapeXml(text: string): string {
     .replace(/'/g, "&apos;");
 }
 
-// Get voices available in this browser
-export async function getAvailableVoices(): Promise<TTSVoice[]> {
-  return new Promise((resolve) => {
-    const synth = window.speechSynthesis;
-    let voices = synth.getVoices();
-    if (voices.length > 0) {
-      resolve(mapVoices(voices));
-      return;
-    }
-    // voices load async on first call
-    synth.onvoiceschanged = () => {
-      voices = synth.getVoices();
-      resolve(mapVoices(voices));
-    };
-    // fallback if onvoiceschanged never fires
-    setTimeout(() => {
-      voices = synth.getVoices();
-      resolve(voices.length > 0 ? mapVoices(voices) : FALLBACK_VOICES);
-    }, 1000);
-  });
-}
-
-function mapVoices(voices: SpeechSynthesisVoice[]): TTSVoice[] {
-  const english = voices.filter(v => v.lang.startsWith("en"));
-  const list = english.length > 0 ? english : voices;
-  return list.map(v => ({
-    id: v.name,
-    name: v.name,
-    gender: v.name.toLowerCase().includes("female") || v.name.toLowerCase().includes("zira") || v.name.toLowerCase().includes("samantha") || v.name.toLowerCase().includes("victoria") ? "Female" : "Male",
-    locale: v.lang,
-  }));
-}
-
 const FALLBACK_VOICES: TTSVoice[] = [
-  { id: "en-US-GuyNeural", name: "Guy (Male, US)", gender: "Male", locale: "en-US" },
-  { id: "en-US-JennyNeural", name: "Jenny (Female, US)", gender: "Female", locale: "en-US" },
-  { id: "en-US-AriaNeural", name: "Aria (Female, US)", gender: "Female", locale: "en-US" },
-  { id: "en-US-DavisNeural", name: "Davis (Male, US)", gender: "Male", locale: "en-US" },
-  { id: "en-GB-RyanNeural", name: "Ryan (Male, UK)", gender: "Male", locale: "en-GB" },
-  { id: "en-GB-SoniaNeural", name: "Sonia (Female, UK)", gender: "Female", locale: "en-GB" },
+  { id: "en-US-GuyNeural",    name: "Guy (Male, US)",      gender: "Male",   locale: "en-US" },
+  { id: "en-US-JennyNeural",  name: "Jenny (Female, US)",  gender: "Female", locale: "en-US" },
+  { id: "en-US-AriaNeural",   name: "Aria (Female, US)",   gender: "Female", locale: "en-US" },
+  { id: "en-US-DavisNeural",  name: "Davis (Male, US)",    gender: "Male",   locale: "en-US" },
+  { id: "en-GB-RyanNeural",   name: "Ryan (Male, UK)",     gender: "Male",   locale: "en-GB" },
+  { id: "en-GB-SoniaNeural",  name: "Sonia (Female, UK)",  gender: "Female", locale: "en-GB" },
 ];
 
-// Synthesize using Web Speech API → record with MediaRecorder → return Blob
-export async function synthesizeSpeech(
-  text: string,
-  voiceId = "en-US-GuyNeural",
-  rate = "+0%"
-): Promise<TTSResult> {
-  // Parse rate string like "+10%" or "-5%" into a 0.5–2 range
-  const rateNum = parseRateString(rate);
-
-  // Try Web Speech API with MediaRecorder capture first
+// Fetch available voices from your Edge Function (falls back to hardcoded list)
+export async function getAvailableVoices(): Promise<TTSVoice[]> {
   try {
-    return await synthesizeWithWebSpeech(text, voiceId, rateNum);
+    const resp = await fetch(`${EDGE_TTS_URL}?action=voices`);
+    if (!resp.ok) throw new Error(`Voice list fetch failed: ${resp.status}`);
+    const voices: TTSVoice[] = await resp.json();
+    return voices.length > 0 ? voices : FALLBACK_VOICES;
   } catch (e) {
-    console.warn("Web Speech capture failed, trying StreamElements fallback:", e);
+    console.warn("Could not fetch voice list from Edge Function, using fallback:", e);
+    return FALLBACK_VOICES;
   }
-
-  // Fallback: StreamElements TTS (free, no auth, returns mp3)
-  try {
-    return await synthesizeWithStreamElements(text, voiceId);
-  } catch (e) {
-    console.warn("StreamElements failed, trying TTS.monster:", e);
-  }
-
-  // Last resort: Google Translate TTS (short texts only)
-  return await synthesizeWithGoogleTTS(text);
 }
 
 function parseRateString(rate: string): number {
@@ -102,90 +60,90 @@ function parseRateString(rate: string): number {
   return 1.0 + parseInt(match[1]) / 100;
 }
 
-// --- Strategy 1: Web Speech API + MediaRecorder ---
-async function synthesizeWithWebSpeech(text: string, voiceId: string, rate: number): Promise<TTSResult> {
-  // Get audio context + destination
-  const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-  const audioCtx = new AudioContext();
-  const dest = audioCtx.createMediaStreamDestination();
-  const recorder = new MediaRecorder(dest.stream, { mimeType: getSupportedMimeType() });
-  const chunks: Blob[] = [];
-
-  recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
-  return new Promise((resolve, reject) => {
-    const synth = window.speechSynthesis;
-    const utter = new SpeechSynthesisUtterance(text);
-    utter.rate = Math.max(0.5, Math.min(2, rate));
-
-    // Match voice by name
-    const voices = synth.getVoices();
-    const match = voices.find(v => v.name === voiceId || v.name.includes(voiceId.replace("Neural", "").replace("en-US-", "").replace("en-GB-", "")));
-    if (match) utter.voice = match;
-
-    const wordBoundaries: WordBoundary[] = [];
-    let wordOffset = 0;
-
-    utter.onboundary = (e) => {
-      if (e.name === "word") {
-        const wordText = text.substring(e.charIndex, e.charIndex + (e.charLength || 5));
-        wordBoundaries.push({
-          text: wordText.trim(),
-          offset: e.elapsedTime || wordOffset,
-          duration: 300,
-        });
-        wordOffset += 300;
-      }
-    };
-
-    utter.onend = () => {
-      recorder.stop();
-    };
-
-    utter.onerror = (e) => {
-      recorder.stop();
-      reject(new Error(`Web Speech error: ${e.error}`));
-    };
-
-    recorder.onstop = () => {
-      audioCtx.close();
-      if (chunks.length === 0) {
-        reject(new Error("No audio recorded"));
-        return;
-      }
-      const mimeType = getSupportedMimeType();
-      const audioBlob = new Blob(chunks, { type: mimeType });
-      const durationMs = wordBoundaries.length > 0
-        ? wordBoundaries[wordBoundaries.length - 1].offset + 500
-        : text.split(/\s+/).length * 400;
-      resolve({ audioBlob, wordBoundaries, durationMs });
-    };
-
-    recorder.start(100);
-    synth.speak(utter);
-  });
-}
-
-function getSupportedMimeType(): string {
-  const types = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"];
-  for (const type of types) {
-    if (MediaRecorder.isTypeSupported(type)) return type;
+// Main entry point — tries Edge TTS first, then StreamElements as fallback
+export async function synthesizeSpeech(
+  text: string,
+  voiceId = "en-US-GuyNeural",
+  rate = "+0%",
+  pitch = "+0Hz",
+  volume = "+0%"
+): Promise<TTSResult> {
+  // Strategy 1: Your Supabase Edge Function (Microsoft Edge TTS — free, reliable)
+  try {
+    return await synthesizeWithEdgeTTS(text, voiceId, rate, pitch, volume);
+  } catch (e) {
+    console.warn("Edge TTS failed, falling back to StreamElements:", e);
   }
-  return "audio/webm";
+
+  // Strategy 2: StreamElements TTS (free REST API, no auth needed)
+  try {
+    return await synthesizeWithStreamElements(text, voiceId);
+  } catch (e) {
+    console.warn("StreamElements also failed:", e);
+    throw new Error("All TTS strategies failed. Check your Edge Function URL and deployment.");
+  }
 }
 
-// --- Strategy 2: StreamElements TTS (free REST API, returns mp3) ---
+// ─── Strategy 1: Supabase Edge Function → Microsoft Edge TTS ─────────────────
+async function synthesizeWithEdgeTTS(
+  text: string,
+  voiceId: string,
+  rate: string,
+  pitch: string,
+  volume: string
+): Promise<TTSResult> {
+  const resp = await fetch(EDGE_TTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice: voiceId, rate, pitch, volume }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Edge TTS responded ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+
+  if (data.error) throw new Error(`Edge TTS error: ${data.error}`);
+
+  // Decode base64 audio → Blob
+  const binaryStr = atob(data.audio_base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) {
+    bytes[i] = binaryStr.charCodeAt(i);
+  }
+  const audioBlob = new Blob([bytes], { type: data.format || "audio/mpeg" });
+
+  // Word boundaries come back in ms already (Edge Function handles the conversion)
+  const wordBoundaries: WordBoundary[] = (data.word_boundaries || []).map((wb: any) => ({
+    text: wb.text,
+    offset: wb.offset,
+    duration: wb.duration,
+  }));
+
+  // Calculate duration from last word boundary or estimate from word count
+  const durationMs =
+    wordBoundaries.length > 0
+      ? wordBoundaries[wordBoundaries.length - 1].offset +
+        wordBoundaries[wordBoundaries.length - 1].duration +
+        300
+      : text.split(/\s+/).length * (400 / parseRateString(rate));
+
+  return { audioBlob, wordBoundaries, durationMs };
+}
+
+// ─── Strategy 2: StreamElements TTS ──────────────────────────────────────────
 async function synthesizeWithStreamElements(text: string, voiceId: string): Promise<TTSResult> {
-  // Map Neural voice names to StreamElements voices
   const voiceMap: Record<string, string> = {
-    "en-US-GuyNeural": "Brian",
+    "en-US-GuyNeural":   "Brian",
     "en-US-JennyNeural": "Joanna",
-    "en-US-AriaNeural": "Aria",
+    "en-US-AriaNeural":  "Aria",
     "en-US-DavisNeural": "Matthew",
-    "en-GB-RyanNeural": "Brian",
+    "en-GB-RyanNeural":  "Brian",
     "en-GB-SoniaNeural": "Amy",
   };
-  const seVoice = voiceMap[voiceId] || "Brian";
+  const seVoice = voiceMap[voiceId] ?? "Brian";
   const url = `https://api.streamelements.com/kappa/v2/speech?voice=${seVoice}&text=${encodeURIComponent(text)}`;
 
   const resp = await fetch(url);
@@ -202,46 +160,4 @@ async function synthesizeWithStreamElements(text: string, voiceId: string): Prom
   const durationMs = words.length * msPerWord + 500;
 
   return { audioBlob, wordBoundaries, durationMs };
-}
-
-// --- Strategy 3: Google Translate TTS (works for short texts) ---
-async function synthesizeWithGoogleTTS(text: string): Promise<TTSResult> {
-  // Split into chunks of max 200 chars
-  const chunks = splitIntoChunks(text, 200);
-  const blobs: Blob[] = [];
-  const wordBoundaries: WordBoundary[] = [];
-  let timeOffset = 0;
-
-  for (const chunk of chunks) {
-    const url = `https://translate.google.com/translate_tts?ie=UTF-8&q=${encodeURIComponent(chunk)}&tl=en&client=tw-ob`;
-    const resp = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
-    if (!resp.ok) throw new Error(`Google TTS failed: ${resp.status}`);
-    blobs.push(await resp.blob());
-
-    const words = chunk.split(/\s+/);
-    const msPerWord = 400;
-    words.forEach((word, i) => {
-      wordBoundaries.push({ text: word, offset: timeOffset + i * msPerWord, duration: msPerWord });
-    });
-    timeOffset += words.length * msPerWord;
-  }
-
-  const audioBlob = new Blob(blobs, { type: "audio/mpeg" });
-  return { audioBlob, wordBoundaries, durationMs: timeOffset + 500 };
-}
-
-function splitIntoChunks(text: string, maxLen: number): string[] {
-  const words = text.split(/\s+/);
-  const chunks: string[] = [];
-  let current = "";
-  for (const word of words) {
-    if ((current + " " + word).trim().length > maxLen) {
-      if (current) chunks.push(current.trim());
-      current = word;
-    } else {
-      current = (current + " " + word).trim();
-    }
-  }
-  if (current) chunks.push(current.trim());
-  return chunks;
 }
