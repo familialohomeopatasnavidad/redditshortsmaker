@@ -19,17 +19,17 @@ function cleanText(text: string): string {
 async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any[]> {
   const errors: string[] = [];
   const now = Math.floor(Date.now() / 1000);
+  const fetchLimit = Math.min(Math.max(limit * 4, limit), 100);
 
   const timeRanges: Record<string, number> = {
     hour: 3600, day: 86400, week: 604800, month: 2592000, year: 31536000,
   };
-  // FIX: define afterUnix and use it consistently everywhere
   const afterUnix = now - (timeRanges[time] || 86400);
-  const afterDate = new Date(afterUnix * 1000).toISOString().split("T")[0];
 
-  // Strategy 1: Arctic Shift — drop the after filter, just sort by score and filter client-side
+  // Strategy 1: Arctic Shift — its API rejects some sort params, so fetch a larger batch
+  // and rank/filter client-side.
   try {
-    const url = `https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=${encodeURIComponent(subreddit)}&limit=${limit}&sort=score&order=desc`;
+    const url = `https://arctic-shift.photon-reddit.com/api/posts/search?subreddit=${encodeURIComponent(subreddit)}&limit=${fetchLimit}`;
     console.log("Trying Arctic Shift:", url);
     const resp = await fetch(url, {
       headers: { "User-Agent": "reddit-shorts-maker/1.0" },
@@ -56,7 +56,9 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
           url: `https://reddit.com/r/${post.subreddit || subreddit}/comments/${post.id}`,
           num_comments: post.num_comments || 0,
           created_utc: post.created_utc || now,
-        }));
+        }))
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, limit);
       if (posts.length > 0) {
         console.log(`Arctic Shift returned ${posts.length} posts`);
         return posts;
@@ -71,9 +73,9 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
     errors.push(`Arctic Shift: ${String(e)}`);
   }
 
-  // Strategy 2: PullPush — FIX: was using undefined `after`, now uses `afterUnix`
+  // Strategy 2: PullPush
   try {
-    const url = `https://api.pullpush.io/reddit/search/submission/?subreddit=${encodeURIComponent(subreddit)}&after=${afterUnix}&sort=score&sort_type=desc&size=${limit}`;
+    const url = `https://api.pullpush.io/reddit/search/submission/?subreddit=${encodeURIComponent(subreddit)}&after=${afterUnix}&sort=score&sort_type=desc&size=${fetchLimit}`;
     console.log("Trying PullPush:", url);
     const resp = await fetch(url, {
       headers: { "User-Agent": "reddit-shorts-maker/1.0" },
@@ -98,7 +100,9 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
           url: post.full_link || `https://reddit.com/r/${subreddit}/comments/${post.id}`,
           num_comments: post.num_comments || 0,
           created_utc: post.created_utc || now,
-        }));
+        }))
+        .sort((a: any, b: any) => b.score - a.score)
+        .slice(0, limit);
       if (posts.length > 0) {
         console.log(`PullPush returned ${posts.length} posts`);
         return posts;
