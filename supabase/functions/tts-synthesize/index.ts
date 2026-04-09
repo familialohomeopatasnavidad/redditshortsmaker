@@ -3,7 +3,6 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
 
-// Microsoft Edge TTS via WebSocket - reimplemented for Deno
 const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 const WSS_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
 const VOICE_LIST_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
@@ -31,6 +30,8 @@ function buildSSML(text: string, voice: string, rate: string, pitch: string, vol
   </speak>`;
 }
 
+import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
+
 async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0Hz", volume = "+0%"): Promise<{ audio: Uint8Array; wordBoundaries: Array<{ text: string; offset: number; duration: number }> }> {
   const requestId = generateRequestId();
   const ssml = buildSSML(text, voice, rate, pitch, volume);
@@ -39,7 +40,6 @@ async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0
     const ws = new WebSocket(WSS_URL);
     const audioChunks: Uint8Array[] = [];
     const wordBoundaries: Array<{ text: string; offset: number; duration: number }> = [];
-    let headerSent = false;
 
     const timeout = setTimeout(() => {
       ws.close();
@@ -47,9 +47,7 @@ async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0
     }, 30000);
 
     ws.onopen = () => {
-      // Send config
       ws.send(`Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`);
-      // Send SSML
       ws.send(`X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`);
     };
 
@@ -65,7 +63,7 @@ async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0
                 if (m.Type === "WordBoundary") {
                   wordBoundaries.push({
                     text: m.Data.text.Text,
-                    offset: m.Data.Offset / 10000, // convert to ms
+                    offset: m.Data.Offset / 10000,
                     duration: m.Data.Duration / 10000,
                   });
                 }
@@ -76,7 +74,6 @@ async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0
         if (msg.includes("Path:turn.end")) {
           clearTimeout(timeout);
           ws.close();
-          // Concat audio chunks
           const totalLen = audioChunks.reduce((a, c) => a + c.length, 0);
           const result = new Uint8Array(totalLen);
           let offset = 0;
@@ -88,19 +85,10 @@ async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0
         }
       } else if (event.data instanceof ArrayBuffer) {
         const view = new DataView(event.data);
-        if (!headerSent) {
-          // First binary message has a 2-byte header length prefix
-          const headerLen = view.getUint16(0);
-          const audioData = new Uint8Array(event.data, 2 + headerLen);
-          if (audioData.length > 0) audioChunks.push(audioData);
-          headerSent = true;
-        } else {
-          const headerLen = view.getUint16(0);
-          const audioData = new Uint8Array(event.data, 2 + headerLen);
-          if (audioData.length > 0) audioChunks.push(audioData);
-        }
+        const headerLen = view.getUint16(0);
+        const audioData = new Uint8Array(event.data, 2 + headerLen);
+        if (audioData.length > 0) audioChunks.push(audioData);
       } else if (event.data instanceof Blob) {
-        // Handle Blob type
         event.data.arrayBuffer().then((ab) => {
           const view = new DataView(ab);
           const headerLen = view.getUint16(0);
@@ -136,20 +124,20 @@ Deno.serve(async (req) => {
     if (url.searchParams.get("action") === "voices") {
       const resp = await fetch(VOICE_LIST_URL, {
         headers: {
-          "Authority": "speech.platform.bing.com",
-          "Sec-CH-UA": '" Not;A Brand";v="99", "Microsoft Edge";v="91", "Chromium";v="91"',
-          "Sec-CH-UA-Mobile": "?0",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          "Accept": "*/*",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-Mode": "cors",
-          "Sec-Fetch-Dest": "empty",
-          "Accept-Encoding": "gzip, deflate, br",
-          "Accept-Language": "en-US,en;q=0.9",
         },
       });
       const voices = await resp.json();
-      return new Response(JSON.stringify(voices), {
+      // Filter to English voices and return a simplified list
+      const englishVoices = voices
+        .filter((v: any) => v.Locale?.startsWith("en-"))
+        .map((v: any) => ({
+          id: v.ShortName,
+          name: v.FriendlyName || v.ShortName,
+          gender: v.Gender,
+          locale: v.Locale,
+        }));
+      return new Response(JSON.stringify(englishVoices), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -167,11 +155,11 @@ Deno.serve(async (req) => {
 
     const result = await synthesize(text, voice, rate, pitch, volume);
 
-    // Return audio as base64 + word boundaries
-    const base64Audio = btoa(String.fromCharCode(...result.audio));
+    // Use proper base64 encoding (no stack overflow)
+    const b64 = base64Encode(result.audio);
 
     return new Response(JSON.stringify({
-      audio_base64: base64Audio,
+      audio_base64: b64,
       word_boundaries: result.wordBoundaries,
       format: "audio/mpeg",
     }), {

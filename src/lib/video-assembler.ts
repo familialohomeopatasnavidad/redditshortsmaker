@@ -19,7 +19,6 @@ async function getFFmpeg(onLog?: (msg: string) => void): Promise<FFmpeg> {
     });
   }
 
-  // Load from CDN
   const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
   await ffmpeg.load({
     coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
@@ -50,7 +49,7 @@ export async function assembleVideo(opts: {
   const bgData = new Uint8Array(backgroundClip.data);
   await ff.writeFile("bg.mp4", bgData);
 
-  // Write voiceover audio
+  // Write voiceover audio (now real MP3 from Edge TTS)
   onProgress("Preparing voiceover audio...");
   const audioData = new Uint8Array(await audioBlob.arrayBuffer());
   await ff.writeFile("voice.mp3", audioData);
@@ -68,9 +67,11 @@ export async function assembleVideo(opts: {
     await ff.writeFile("music.mp3", musicData);
   }
 
-  // Single-pass: loop bg, scale, mix audio — all in one ffmpeg call
-  onProgress("Encoding video (single-pass)...", 10);
- 
+  // Build the video filter chain: scale + crop + subtitles
+  const vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=24,subtitles=subs.ass";
+
+  onProgress("Encoding video...", 10);
+
   if (musicTrack) {
     const fadeStart = Math.max(0, durationSec - 2);
     await ff.exec([
@@ -79,7 +80,7 @@ export async function assembleVideo(opts: {
       "-i", "voice.mp3",
       "-i", "music.mp3",
       "-t", String(durationSec),
-      "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=24",
+      "-vf", vf,
       "-filter_complex",
       `[2:a]volume=0.12,afade=t=out:st=${fadeStart}:d=2[music];[1:a][music]amix=inputs=2:duration=first[aout]`,
       "-map", "0:v",
@@ -101,7 +102,7 @@ export async function assembleVideo(opts: {
       "-i", "bg.mp4",
       "-i", "voice.mp3",
       "-t", String(durationSec),
-      "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=24",
+      "-vf", vf,
       "-map", "0:v",
       "-map", "1:a",
       "-c:v", "libx264",
