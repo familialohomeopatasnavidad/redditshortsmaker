@@ -13,7 +13,7 @@ export interface RedditPost {
 }
 
 const WORDS_PER_MINUTE = 150;
-const MAX_WORDS = 130;
+const MAX_WORDS = 200;
 
 function cleanText(text: string): string {
   let cleaned = text;
@@ -79,7 +79,7 @@ export async function fetchRedditPosts(
         estimatedDuration: (words.length / WORDS_PER_MINUTE) * 60,
       };
     })
-    .filter((p: RedditPost) => p.wordCount >= 20 && p.wordCount <= MAX_WORDS * 1.5)
+    .filter((p: RedditPost) => p.wordCount >= 25 && p.wordCount <= MAX_WORDS * 1.5)
     .sort((a: RedditPost, b: RedditPost) => b.score - a.score)
     .slice(0, count);
 
