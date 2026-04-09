@@ -16,6 +16,49 @@ function cleanText(text: string): string {
   return cleaned.trim();
 }
 
+function isUsableComment(comment: any): boolean {
+  const body = typeof comment?.body === "string" ? cleanText(comment.body) : "";
+  const author = String(comment?.author || "").toLowerCase();
+
+  if (!body || body === "[removed]" || body === "[deleted]") return false;
+  if (body.split(/\s+/).filter(Boolean).length < 25) return false;
+  if (author.includes("automoderator") || author.includes("bot")) return false;
+  if (/i am a bot|this action was performed automatically|please read this message/i.test(body)) return false;
+
+  return true;
+}
+
+async function fetchTopComments(subreddit: string, limit: number): Promise<any[]> {
+  const fetchLimit = Math.min(Math.max(limit * 4, limit), 100);
+  const url = `https://arctic-shift.photon-reddit.com/api/comments/search?subreddit=${encodeURIComponent(subreddit)}&limit=${fetchLimit}`;
+  console.log("Trying comment fallback:", url);
+
+  const resp = await fetch(url, {
+    headers: { "User-Agent": "reddit-shorts-maker/1.0" },
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Comment fallback: ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  return (data?.data || [])
+    .filter((comment: any) => isUsableComment(comment))
+    .map((comment: any) => ({
+      id: `comment-${comment.id}`,
+      title: comment.link_title || `Top response from r/${comment.subreddit || subreddit}`,
+      selftext: cleanText(comment.body),
+      score: comment.score || 0,
+      subreddit: comment.subreddit || subreddit,
+      author: comment.author || "anonymous",
+      url: comment.permalink ? `https://reddit.com${comment.permalink}` : `https://reddit.com/r/${subreddit}`,
+      num_comments: 0,
+      created_utc: comment.created_utc || Math.floor(Date.now() / 1000),
+    }))
+    .sort((a: any, b: any) => b.score - a.score)
+    .slice(0, limit);
+}
+
 async function fetchFromReddit(subreddit: string, limit: number, time: string): Promise<any[]> {
   const errors: string[] = [];
   const now = Math.floor(Date.now() / 1000);
@@ -187,6 +230,18 @@ async function fetchFromReddit(subreddit: string, limit: number, time: string): 
     }
   } catch (e) {
     errors.push(`RSS: ${String(e)}`);
+  }
+
+  // Strategy 5: comment fallback for question-driven subreddits like AskReddit
+  try {
+    const comments = await fetchTopComments(subreddit, limit);
+    if (comments.length > 0) {
+      console.log(`Comment fallback returned ${comments.length} items`);
+      return comments;
+    }
+    errors.push("Comments: 0 usable items");
+  } catch (e) {
+    errors.push(`Comments: ${String(e)}`);
   }
 
   throw new Error(`All Reddit sources failed: ${errors.join("; ")}`);
