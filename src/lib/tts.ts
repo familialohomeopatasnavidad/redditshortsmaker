@@ -20,7 +20,34 @@ export interface TTSVoice {
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
-// Fetch available voices from Edge TTS
+// Edge TTS WebSocket config (runs in browser — no server restrictions)
+const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+const WSS_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
+
+function generateRequestId(): string {
+  return crypto.randomUUID().replace(/-/g, "");
+}
+
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildSSML(text: string, voice: string, rate: string, pitch: string, volume: string): string {
+  return `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
+    <voice name='${voice}'>
+      <prosody pitch='${pitch}' rate='${rate}' volume='${volume}'>
+        ${escapeXml(text)}
+      </prosody>
+    </voice>
+  </speak>`;
+}
+
+// Fetch available voices from the edge function (HTTP — works fine)
 export async function getAvailableVoices(): Promise<TTSVoice[]> {
   try {
     const resp = await fetch(
@@ -36,7 +63,6 @@ export async function getAvailableVoices(): Promise<TTSVoice[]> {
     return await resp.json();
   } catch (err) {
     console.error("Failed to fetch voices:", err);
-    // Return fallback voices
     return [
       { id: "en-US-GuyNeural", name: "Guy (Male, US)", gender: "Male", locale: "en-US" },
       { id: "en-US-JennyNeural", name: "Jenny (Female, US)", gender: "Female", locale: "en-US" },
@@ -48,51 +74,103 @@ export async function getAvailableVoices(): Promise<TTSVoice[]> {
   }
 }
 
-// Synthesize speech using Edge TTS via the edge function
+// Synthesize speech via Edge TTS WebSocket — runs in the BROWSER
 export async function synthesizeSpeech(
   text: string,
   voiceId = "en-US-GuyNeural",
   rate = "+0%"
 ): Promise<TTSResult> {
-  const resp = await fetch(
-    `${SUPABASE_URL}/functions/v1/tts-synthesize`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        apikey: SUPABASE_KEY,
-        Authorization: `Bearer ${SUPABASE_KEY}`,
-      },
-      body: JSON.stringify({ text, voice: voiceId, rate }),
-    }
-  );
+  const requestId = generateRequestId();
+  const ssml = buildSSML(text, voiceId, rate, "+0Hz", "+0%");
 
-  if (!resp.ok) {
-    const errData = await resp.json().catch(() => ({ error: resp.statusText }));
-    throw new Error(errData.error || `TTS failed: ${resp.status}`);
-  }
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(WSS_URL);
+    const audioChunks: Uint8Array[] = [];
+    const wordBoundaries: WordBoundary[] = [];
 
-  const data = await resp.json();
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("TTS WebSocket timeout after 30s"));
+    }, 30000);
 
-  // Decode base64 audio to blob
-  const binaryStr = atob(data.audio_base64);
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) {
-    bytes[i] = binaryStr.charCodeAt(i);
-  }
-  const audioBlob = new Blob([bytes], { type: "audio/mpeg" });
+    ws.onopen = () => {
+      // Send config
+      ws.send(
+        `Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n` +
+        `{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`
+      );
+      // Send SSML request
+      ws.send(`X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`);
+    };
 
-  const wordBoundaries: WordBoundary[] = data.word_boundaries || [];
+    ws.onmessage = async (event) => {
+      if (typeof event.data === "string") {
+        const msg = event.data;
+        // Parse word boundary metadata
+        if (msg.includes("Path:audio.metadata")) {
+          try {
+            const jsonStr = msg.substring(msg.indexOf("{"));
+            const metadata = JSON.parse(jsonStr);
+            if (metadata.Metadata) {
+              for (const m of metadata.Metadata) {
+                if (m.Type === "WordBoundary") {
+                  wordBoundaries.push({
+                    text: m.Data.text.Text,
+                    offset: m.Data.Offset / 10000, // 100ns ticks → ms
+                    duration: m.Data.Duration / 10000,
+                  });
+                }
+              }
+            }
+          } catch {}
+        }
+        // End of stream
+        if (msg.includes("Path:turn.end")) {
+          clearTimeout(timeout);
+          ws.close();
+          // Concat audio
+          const totalLen = audioChunks.reduce((a, c) => a + c.length, 0);
+          const audio = new Uint8Array(totalLen);
+          let offset = 0;
+          for (const chunk of audioChunks) {
+            audio.set(chunk, offset);
+            offset += chunk.length;
+          }
+          const audioBlob = new Blob([audio], { type: "audio/mpeg" });
+          let durationMs = 0;
+          if (wordBoundaries.length > 0) {
+            const last = wordBoundaries[wordBoundaries.length - 1];
+            durationMs = last.offset + last.duration + 200;
+          } else {
+            durationMs = (audio.length / 6) * 1000 / 1024;
+          }
+          resolve({ audioBlob, wordBoundaries, durationMs });
+        }
+      } else {
+        // Binary audio data (ArrayBuffer or Blob)
+        let ab: ArrayBuffer;
+        if (event.data instanceof Blob) {
+          ab = await event.data.arrayBuffer();
+        } else {
+          ab = event.data as ArrayBuffer;
+        }
+        const view = new DataView(ab);
+        const headerLen = view.getUint16(0);
+        const audioData = new Uint8Array(ab, 2 + headerLen);
+        if (audioData.length > 0) audioChunks.push(audioData);
+      }
+    };
 
-  // Calculate total duration from word boundaries
-  let durationMs = 0;
-  if (wordBoundaries.length > 0) {
-    const last = wordBoundaries[wordBoundaries.length - 1];
-    durationMs = last.offset + last.duration + 200;
-  } else {
-    // Estimate from audio size (~6KB/s for 48kbps mp3)
-    durationMs = (audioBlob.size / 6) * 1000 / 1024;
-  }
+    ws.onerror = () => {
+      clearTimeout(timeout);
+      reject(new Error("Edge TTS WebSocket connection failed"));
+    };
 
-  return { audioBlob, wordBoundaries, durationMs };
+    ws.onclose = (event) => {
+      if (!event.wasClean && audioChunks.length === 0) {
+        clearTimeout(timeout);
+        reject(new Error(`WebSocket closed unexpectedly: code ${event.code}`));
+      }
+    };
+  });
 }
