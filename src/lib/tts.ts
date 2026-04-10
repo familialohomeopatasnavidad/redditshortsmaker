@@ -18,8 +18,7 @@ export interface TTSVoice {
 }
 
 // ─── CONFIG ──────────────────────────────────────────────────────────────────
-// Replace this with your actual Supabase Edge Function URL
-const EDGE_TTS_URL = "https://YOUR_PROJECT.supabase.co/functions/v1/YOUR_FUNCTION_NAME";
+const EDGE_TTS_URL = `https://${import.meta.env.VITE_SUPABASE_PROJECT_ID}.supabase.co/functions/v1/tts-synthesize`;
 // ─────────────────────────────────────────────────────────────────────────────
 
 function escapeXml(text: string): string {
