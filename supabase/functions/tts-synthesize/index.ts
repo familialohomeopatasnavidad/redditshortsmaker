@@ -164,8 +164,8 @@ Deno.serve(async (req) => {
 
     const result = await synthesize(text, voice, rate, pitch, volume);
 
-    // Use proper base64 encoding (no stack overflow)
-    const b64 = base64Encode(result.audio);
+    // Use helper to avoid type issues with base64Encode
+    const b64 = uint8ArrayToBase64(result.audio);
 
     return new Response(JSON.stringify({
       audio_base64: b64,
