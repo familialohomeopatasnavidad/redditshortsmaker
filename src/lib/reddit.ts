@@ -79,9 +79,23 @@ export async function fetchRedditPosts(
         estimatedDuration: (words.length / WORDS_PER_MINUTE) * 60,
       };
     })
-    .filter((p: RedditPost) => p.wordCount >= 25 && p.wordCount <= MAX_WORDS * 1.5)
-    .sort((a: RedditPost, b: RedditPost) => b.score - a.score)
-    .slice(0, count);
+    .filter((p: RedditPost) => p.wordCount >= 25 && p.wordCount <= MAX_WORDS * 1.5);
+
+  // Weighted random selection: higher score = higher chance, but not deterministic
+  const selected: RedditPost[] = [];
+  const pool = [...filtered];
+  while (selected.length < count && pool.length > 0) {
+    // Weight by score (minimum weight 1)
+    const weights = pool.map((p) => Math.max(p.score, 1));
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let r = Math.random() * totalWeight;
+    let idx = 0;
+    for (let i = 0; i < weights.length; i++) {
+      r -= weights[i];
+      if (r <= 0) { idx = i; break; }
+    }
+    selected.push(pool.splice(idx, 1)[0]);
+  }
 
   if (filtered.length === 0) {
     throw new Error("No suitable posts found. Try a different subreddit.");
