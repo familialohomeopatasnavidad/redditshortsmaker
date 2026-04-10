@@ -32,6 +32,15 @@ function buildSSML(text: string, voice: string, rate: string, pitch: string, vol
 
 import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
 
+// Helper to convert Uint8Array to base64 string
+function uint8ArrayToBase64(arr: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < arr.length; i++) {
+    binary += String.fromCharCode(arr[i]);
+  }
+  return btoa(binary);
+}
+
 async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0Hz", volume = "+0%"): Promise<{ audio: Uint8Array; wordBoundaries: Array<{ text: string; offset: number; duration: number }> }> {
   const requestId = generateRequestId();
   const ssml = buildSSML(text, voice, rate, pitch, volume);
@@ -155,8 +164,8 @@ Deno.serve(async (req) => {
 
     const result = await synthesize(text, voice, rate, pitch, volume);
 
-    // Use proper base64 encoding (no stack overflow)
-    const b64 = base64Encode(result.audio);
+    // Use helper to avoid type issues with base64Encode
+    const b64 = uint8ArrayToBase64(result.audio);
 
     return new Response(JSON.stringify({
       audio_base64: b64,
