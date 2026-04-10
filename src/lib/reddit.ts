@@ -97,11 +97,11 @@ export async function fetchRedditPosts(
     selected.push(pool.splice(idx, 1)[0]);
   }
 
-  if (filtered.length === 0) {
+  if (selected.length === 0) {
     throw new Error("No suitable posts found. Try a different subreddit.");
   }
 
-  return filtered;
+  return selected;
 }
 
 export function formatScript(post: RedditPost): string {
