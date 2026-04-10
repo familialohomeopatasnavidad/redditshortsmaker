@@ -1,38 +1,29 @@
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const TRUSTED_CLIENT_TOKEN = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
-const WSS_URL = `wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1?TrustedClientToken=${TRUSTED_CLIENT_TOKEN}`;
-const VOICE_LIST_URL = `https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
-
-function generateRequestId(): string {
-  return crypto.randomUUID().replace(/-/g, "");
+interface WordBoundary {
+  text: string;
+  offset: number;
+  duration: number;
 }
 
-function escapeXml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
+const VOICES = [
+  { id: "en-US-GuyNeural", name: "Guy (Male, US)", gender: "Male", locale: "en-US" },
+  { id: "en-US-JennyNeural", name: "Jenny (Female, US)", gender: "Female", locale: "en-US" },
+  { id: "en-US-AriaNeural", name: "Aria (Female, US)", gender: "Female", locale: "en-US" },
+  { id: "en-US-DavisNeural", name: "Davis (Male, US)", gender: "Male", locale: "en-US" },
+  { id: "en-US-ChristopherNeural", name: "Christopher (Male, US)", gender: "Male", locale: "en-US" },
+  { id: "en-US-MichelleNeural", name: "Michelle (Female, US)", gender: "Female", locale: "en-US" },
+  { id: "en-GB-RyanNeural", name: "Ryan (Male, UK)", gender: "Male", locale: "en-GB" },
+  { id: "en-GB-SoniaNeural", name: "Sonia (Female, UK)", gender: "Female", locale: "en-GB" },
+  { id: "en-AU-WilliamNeural", name: "William (Male, AU)", gender: "Male", locale: "en-AU" },
+  { id: "en-AU-NatashaNeural", name: "Natasha (Female, AU)", gender: "Female", locale: "en-AU" },
+  { id: "en-CA-LiamNeural", name: "Liam (Male, CA)", gender: "Male", locale: "en-CA" },
+  { id: "en-CA-ClaraNeural", name: "Clara (Female, CA)", gender: "Female", locale: "en-CA" },
+];
 
-function buildSSML(text: string, voice: string, rate: string, pitch: string, volume: string): string {
-  return `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>
-    <voice name='${voice}'>
-      <prosody pitch='${pitch}' rate='${rate}' volume='${volume}'>
-        ${escapeXml(text)}
-      </prosody>
-    </voice>
-  </speak>`;
-}
-
-import { encode as base64Encode } from "https://deno.land/std@0.168.0/encoding/base64.ts";
-
-// Helper to convert Uint8Array to base64 string
 function uint8ArrayToBase64(arr: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < arr.length; i++) {
@@ -41,83 +32,126 @@ function uint8ArrayToBase64(arr: Uint8Array): string {
   return btoa(binary);
 }
 
-async function synthesize(text: string, voice: string, rate = "+0%", pitch = "+0Hz", volume = "+0%"): Promise<{ audio: Uint8Array; wordBoundaries: Array<{ text: string; offset: number; duration: number }> }> {
-  const requestId = generateRequestId();
-  const ssml = buildSSML(text, voice, rate, pitch, volume);
+function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
+  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
 
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(WSS_URL);
-    const audioChunks: Uint8Array[] = [];
-    const wordBoundaries: Array<{ text: string; offset: number; duration: number }> = [];
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.length;
+  }
 
-    const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error("TTS WebSocket timeout after 30s"));
-    }, 30000);
+  return output;
+}
 
-    ws.onopen = () => {
-      ws.send(`Content-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n{"context":{"synthesis":{"audio":{"metadataoptions":{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"true"},"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}`);
-      ws.send(`X-RequestId:${requestId}\r\nContent-Type:application/ssml+xml\r\nPath:ssml\r\n\r\n${ssml}`);
-    };
+function parseRateString(rate: string): number {
+  const match = rate.match(/([+-]?\d+)%/);
+  if (!match) return 1;
+  return 1 + parseInt(match[1], 10) / 100;
+}
 
-    ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        const msg = event.data;
-        if (msg.includes("Path:audio.metadata")) {
-          try {
-            const jsonStr = msg.substring(msg.indexOf("{"));
-            const metadata = JSON.parse(jsonStr);
-            if (metadata.Metadata) {
-              for (const m of metadata.Metadata) {
-                if (m.Type === "WordBoundary") {
-                  wordBoundaries.push({
-                    text: m.Data.text.Text,
-                    offset: m.Data.Offset / 10000,
-                    duration: m.Data.Duration / 10000,
-                  });
-                }
-              }
-            }
-          } catch {}
-        }
-        if (msg.includes("Path:turn.end")) {
-          clearTimeout(timeout);
-          ws.close();
-          const totalLen = audioChunks.reduce((a, c) => a + c.length, 0);
-          const result = new Uint8Array(totalLen);
-          let offset = 0;
-          for (const chunk of audioChunks) {
-            result.set(chunk, offset);
-            offset += chunk.length;
-          }
-          resolve({ audio: result, wordBoundaries });
-        }
-      } else if (event.data instanceof ArrayBuffer) {
-        const view = new DataView(event.data);
-        const headerLen = view.getUint16(0);
-        const audioData = new Uint8Array(event.data, 2 + headerLen);
-        if (audioData.length > 0) audioChunks.push(audioData);
-      } else if (event.data instanceof Blob) {
-        event.data.arrayBuffer().then((ab) => {
-          const view = new DataView(ab);
-          const headerLen = view.getUint16(0);
-          const audioData = new Uint8Array(ab, 2 + headerLen);
-          if (audioData.length > 0) audioChunks.push(audioData);
-        });
+function splitText(text: string, maxChars = 180): string[] {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return [];
+
+  const sentences = normalized.match(/[^.!?]+[.!?]?/g) ?? [normalized];
+  const chunks: string[] = [];
+  let current = "";
+
+  const pushCurrent = () => {
+    if (current.trim()) chunks.push(current.trim());
+    current = "";
+  };
+
+  for (const sentence of sentences) {
+    const trimmedSentence = sentence.trim();
+    if (!trimmedSentence) continue;
+
+    if (trimmedSentence.length <= maxChars) {
+      const candidate = current ? `${current} ${trimmedSentence}` : trimmedSentence;
+      if (candidate.length <= maxChars) {
+        current = candidate;
+      } else {
+        pushCurrent();
+        current = trimmedSentence;
       }
-    };
+      continue;
+    }
 
-    ws.onerror = (err) => {
-      clearTimeout(timeout);
-      reject(new Error(`WebSocket error: ${String(err)}`));
-    };
-
-    ws.onclose = (event) => {
-      if (!event.wasClean && audioChunks.length === 0) {
-        clearTimeout(timeout);
-        reject(new Error(`WebSocket closed unexpectedly: code ${event.code}`));
+    const words = trimmedSentence.split(/\s+/);
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (candidate.length <= maxChars) {
+        current = candidate;
+      } else {
+        pushCurrent();
+        current = word;
       }
-    };
+    }
+  }
+
+  pushCurrent();
+  return chunks;
+}
+
+function mapVoiceToLang(voice: string): string {
+  if (voice.startsWith("en-GB")) return "en-GB";
+  if (voice.startsWith("en-AU")) return "en-AU";
+  if (voice.startsWith("en-CA")) return "en-CA";
+  return "en";
+}
+
+async function fetchTtsChunk(text: string, lang: string): Promise<Uint8Array> {
+  const encodedText = encodeURIComponent(text);
+  const urls = [
+    `https://translate.googleapis.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodedText}`,
+    `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encodedText}`,
+  ];
+
+  let lastError = "Unknown TTS error";
+
+  for (const url of urls) {
+    try {
+      const resp = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0",
+          Accept: "audio/mpeg,audio/*,*/*",
+        },
+      });
+
+      if (!resp.ok) {
+        lastError = `${resp.status} ${await resp.text()}`;
+        continue;
+      }
+
+      return new Uint8Array(await resp.arrayBuffer());
+    } catch (error) {
+      lastError = String(error);
+    }
+  }
+
+  throw new Error(`All TTS providers failed: ${lastError}`);
+}
+
+function buildEstimatedWordBoundaries(text: string, durationMs: number): WordBoundary[] {
+  const words = text.split(/\s+/).map((word) => word.trim()).filter(Boolean);
+  if (words.length === 0) return [];
+
+  const weights = words.map((word) => Math.max(1, word.replace(/[^a-zA-Z0-9']/g, "").length));
+  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+
+  let offset = 0;
+  return words.map((word, index) => {
+    const remaining = durationMs - offset;
+    const isLast = index === words.length - 1;
+    const duration = isLast
+      ? Math.max(120, remaining)
+      : Math.max(120, Math.round((durationMs * weights[index]) / totalWeight));
+
+    const boundary = { text: word, offset, duration };
+    offset += duration;
+    return boundary;
   });
 }
 
@@ -128,48 +162,39 @@ Deno.serve(async (req) => {
 
   try {
     const url = new URL(req.url);
-    
-    // Voice listing endpoint
+
     if (url.searchParams.get("action") === "voices") {
-      const resp = await fetch(VOICE_LIST_URL, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        },
-      });
-      const voices = await resp.json();
-      // Filter to English voices and return a simplified list
-      const englishVoices = voices
-        .filter((v: any) => v.Locale?.startsWith("en-"))
-        .map((v: any) => ({
-          id: v.ShortName,
-          name: v.FriendlyName || v.ShortName,
-          gender: v.Gender,
-          locale: v.Locale,
-        }));
-      return new Response(JSON.stringify(englishVoices), {
+      return new Response(JSON.stringify(VOICES), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Synthesis endpoint
     const body = await req.json();
-    const { text, voice = "en-US-GuyNeural", rate = "+0%", pitch = "+0Hz", volume = "+0%" } = body;
+    const { text, voice = "en-US-GuyNeural", rate = "+0%" } = body;
 
-    if (!text || typeof text !== "string" || text.length > 5000) {
+    if (!text || typeof text !== "string" || text.trim().length === 0 || text.length > 5000) {
       return new Response(JSON.stringify({ error: "text is required and must be under 5000 chars" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const result = await synthesize(text, voice, rate, pitch, volume);
+    const chunks = splitText(text);
+    const lang = mapVoiceToLang(voice);
+    const audioChunks: Uint8Array[] = [];
 
-    // Use helper to avoid type issues with base64Encode
-    const b64 = uint8ArrayToBase64(result.audio);
+    for (const chunk of chunks) {
+      audioChunks.push(await fetchTtsChunk(chunk, lang));
+    }
+
+    const audio = concatUint8Arrays(audioChunks);
+    const durationMs = Math.max(1000, Math.round(text.split(/\s+/).filter(Boolean).length * (380 / parseRateString(rate))));
+    const wordBoundaries = buildEstimatedWordBoundaries(text, durationMs);
 
     return new Response(JSON.stringify({
-      audio_base64: b64,
-      word_boundaries: result.wordBoundaries,
+      audio_base64: uint8ArrayToBase64(audio),
+      word_boundaries: wordBoundaries,
+      duration_ms: durationMs,
       format: "audio/mpeg",
     }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
